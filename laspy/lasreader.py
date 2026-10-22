@@ -22,6 +22,11 @@ from .waveform.descriptor import (
 )
 from .waveform.mode import WaveformMode
 from .waveform.record import IWaveformReader
+from .waveform.utils import (
+    EVLR_HEADER_SIZE,
+    WAVEFORM_PACKET_EVLR_RECORD_ID,
+    WAVEFORM_PACKET_EVLR_USER_ID,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -138,22 +143,26 @@ class LasReader:
         if not self.header.point_format.has_waveform_packet:
             return False
 
-        if not self.header.global_encoding.waveform_data_packets_external:
-            raise ValueError(
-                "This reader expects waveform data to live in an external .wdp file"
-            )
+        global_encoding = self.header.global_encoding
+        if global_encoding.waveform_data_packets_external:
+            return self._ensure_external_waveform_source()
 
+        if global_encoding.waveform_data_packets_internal:
+            return self._ensure_internal_waveform_source()
+
+        raise ValueError(
+            "This reader expects waveform data to live in an external .wdp file"
+        )
+
+    def _ensure_external_waveform_source(self) -> bool:
         source_name = getattr(self._source, "name", None)
         if source_name is None:
             raise ValueError(
                 "Cannot locate the external waveform .wdp file from this source."
             )
 
-        self._waveform_descriptors_registry = (
-            WaveformPacketDescriptorRegistry.from_vlrs(self.header.vlrs)
-        )
-        wave_dtype = self._waveform_descriptors_registry.dtype()
-
+        registry = WaveformPacketDescriptorRegistry.from_vlrs(self.header.vlrs)
+        wave_dtype = registry.dtype()
         las_path = Path(source_name)
         wdp_path = las_path.with_suffix(".wdp")
         waveform_file = wdp_path.open("rb")
@@ -161,17 +170,101 @@ class LasReader:
             waveform_file.close()
             raise ValueError("No waveform packet descriptors found in VLRs")
 
+        self._waveform_descriptors_registry = registry
         self._waveform_source = WaveReader(
             waveform_file,
-            bits_per_sample=self._waveform_descriptors_registry.bits_per_sample,
-            number_of_samples=self._waveform_descriptors_registry.number_of_samples,
-            temporal_sample_spacing=self._waveform_descriptors_registry.temporal_sample_spacing,
+            bits_per_sample=registry.bits_per_sample,
+            number_of_samples=registry.number_of_samples,
+            temporal_sample_spacing=registry.temporal_sample_spacing,
             wave_dtype=wave_dtype,
             closefd=True,
             source_path=wdp_path,
         )
         waveform_file.seek(0, os.SEEK_SET)
         return True
+
+    def _ensure_internal_waveform_source(self) -> bool:
+        if self.header.version.minor < 4:
+            raise ValueError("Internal waveform packets require LAS 1.4 EVLR storage")
+
+        if self.header.evlrs is None and self._source.seekable():
+            # EVLRs were not read during opening (e.g. read_evlrs=False)
+            self.read_evlrs()
+
+        evlrs = self.header.evlrs
+        if evlrs is None:
+            raise ValueError(
+                "Cannot read internal waveform packets: the EVLRs holding the "
+                "waveform data are not available from this source"
+            )
+
+        waveform_evlrs = [
+            vlr
+            for vlr in evlrs
+            if vlr.user_id == WAVEFORM_PACKET_EVLR_USER_ID
+            and vlr.record_id == WAVEFORM_PACKET_EVLR_RECORD_ID
+        ]
+        if len(waveform_evlrs) == 0:
+            raise ValueError(
+                "Cannot read internal waveform packets: no EVLR with "
+                f"User ID {WAVEFORM_PACKET_EVLR_USER_ID!r} and Record ID "
+                f"{WAVEFORM_PACKET_EVLR_RECORD_ID} was found"
+            )
+        if len(waveform_evlrs) > 1:
+            raise ValueError(
+                "Cannot read internal waveform packets: more than one EVLR with "
+                f"User ID {WAVEFORM_PACKET_EVLR_USER_ID!r} and Record ID "
+                f"{WAVEFORM_PACKET_EVLR_RECORD_ID} was found"
+            )
+
+        registry = WaveformPacketDescriptorRegistry.from_vlrs(self.header.vlrs)
+        if registry.dtype() is None:
+            raise ValueError("No waveform packet descriptors found in VLRs")
+        self._waveform_descriptors_registry = registry
+
+        record_data = waveform_evlrs[0].record_data_bytes()
+        self._waveform_source = InternalWaveformReader(
+            record_data,
+            bits_per_sample=registry.bits_per_sample,
+            number_of_samples=registry.number_of_samples,
+            temporal_sample_spacing=registry.temporal_sample_spacing,
+            wave_dtype=registry.dtype(),
+        )
+        return True
+
+    def _validate_internal_waveform_offsets(
+        self, points: record.ScaleAwarePointRecord
+    ) -> None:
+        source = self._waveform_source
+        assert isinstance(source, InternalWaveformReader)
+
+        has_waveform_mask = np.asarray(
+            points.array["wavepacket_index"] != 0, dtype=bool
+        )
+        if not has_waveform_mask.any():
+            return
+
+        waveform_size = source.wave_size_bytes
+        sizes = np.asarray(points.array["wavepacket_size"], dtype=np.int64)
+        unexpected_sizes = set(np.unique(sizes[has_waveform_mask])) - {waveform_size}
+        if unexpected_sizes:
+            raise ValueError(
+                "Inconsistent waveform sizes in point data: "
+                f"{unexpected_sizes} but descriptor size is {waveform_size}"
+            )
+
+        offsets = np.asarray(points.array["wavepacket_offset"], dtype=np.int64)
+        relative_offsets = offsets[has_waveform_mask] - EVLR_HEADER_SIZE
+        if (
+            np.any(relative_offsets < 0)
+            or np.any(np.remainder(relative_offsets, waveform_size) != 0)
+            or np.any(relative_offsets + sizes[has_waveform_mask] > source.data_length)
+        ):
+            raise ValueError(
+                "A waveform packet offset/size points outside of the "
+                f"{WAVEFORM_PACKET_EVLR_USER_ID}/{WAVEFORM_PACKET_EVLR_RECORD_ID} "
+                "EVLR data"
+            )
 
     def _ensure_points_have_valid_waveform_descriptors(
         self, points: record.ScaleAwarePointRecord
@@ -242,6 +335,9 @@ class LasReader:
 
         self._ensure_points_have_valid_waveform_descriptors(points)
 
+        if isinstance(self._waveform_source, InternalWaveformReader):
+            self._validate_internal_waveform_offsets(points)
+
         if waveform_mode is WaveformMode.LAZY:
             points._set_waveform_state(record.LazyWaveformState(self._waveform_source))
             return points
@@ -249,6 +345,7 @@ class LasReader:
         waveforms_record, points_waveform_index = WaveformRecord.from_points(
             points.array,
             self._waveform_source,
+            offset_origin=self._waveform_source.offset_origin,
         )
 
         points._set_waveform_state(
@@ -593,3 +690,65 @@ class WaveReader(IWaveformReader):
     def close(self) -> None:
         if self._closefd:
             self._source.close()
+
+
+class InternalWaveformReader(IWaveformReader):
+    """Reads waveform packets stored inside the LASF_Spec/65535 EVLR.
+
+    The packet bytes are the EVLR record data, so packet index 0 starts at the
+    first record-data byte (point wavepacket_offset 60 relative to the EVLR
+    header start).
+    """
+
+    def __init__(
+        self,
+        record_data: bytes,
+        bits_per_sample: int,
+        number_of_samples: int,
+        temporal_sample_spacing: int,
+        wave_dtype: np.dtype,
+    ):
+        self._source = io.BytesIO(record_data)
+        self.bits_per_sample = bits_per_sample
+        self.number_of_samples = number_of_samples
+        self._temporal_sample_spacing = temporal_sample_spacing
+        self._wave_dtype = wave_dtype
+        self._wave_size_bytes = (self.bits_per_sample // 8) * self.number_of_samples
+        self.data_length = len(record_data)
+
+    @property
+    def offset_origin(self) -> int:
+        return EVLR_HEADER_SIZE
+
+    @property
+    def source(self) -> BinaryIO:
+        return self._source
+
+    @property
+    def temporal_sample_spacing(self) -> int:
+        return self._temporal_sample_spacing
+
+    @property
+    def wave_dtype(self) -> np.dtype:
+        return self._wave_dtype
+
+    @property
+    def wave_size_bytes(self) -> int:
+        return self._wave_size_bytes
+
+    def read_n_waveforms(self, n: int) -> bytearray:
+        total_size = n * self.wave_size_bytes
+        data = self._source.read(total_size)
+        if len(data) != total_size:
+            raise ValueError(
+                f"failed to fill whole waveform buffer: requested {total_size} bytes, got {len(data)}"
+            )
+        return bytearray(data)
+
+    def seek(self, waveform_index: int) -> None:
+        self._source.seek(waveform_index * self.wave_size_bytes)
+
+    def close(self) -> None:
+        # The data lives in memory and lazy waveform states may still need it
+        # after the owning LasReader is closed, so nothing to do.
+        pass

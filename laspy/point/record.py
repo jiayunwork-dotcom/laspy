@@ -124,6 +124,7 @@ class PackedPointRecord:
                 waveforms, points_waveform_index = WaveformRecord.from_points(
                     self.array,
                     reader,
+                    offset_origin=getattr(reader, "offset_origin", None),
                 )
                 self._set_waveform_state(
                     EagerWaveformState(

@@ -125,13 +125,26 @@ def test_lasfwreader_lazy_mode_without_waveform_packets(
 def test_lasfwreader_requires_external_waveforms(tmp_path: Path) -> None:
     las = laspy.create(point_format=10, file_version="1.4")
     las.header.global_encoding.waveform_data_packets_external = False
+    las.header.global_encoding.waveform_data_packets_internal = False
+    path = tmp_path / "no_waveforms.las"
+    las.write(str(path))
+
+    with path.open("rb") as handle:
+        with LasReader(handle, waveform_mode=WaveformMode.LAZY) as reader:
+            with pytest.raises(ValueError, match="external"):
+                reader.read_points(1)
+
+
+def test_lasfwreader_internal_without_waveform_evlr_raises(tmp_path: Path) -> None:
+    las = laspy.create(point_format=10, file_version="1.4")
+    las.header.global_encoding.waveform_data_packets_external = False
     las.header.global_encoding.waveform_data_packets_internal = True
     path = tmp_path / "internal_only.las"
     las.write(str(path))
 
     with path.open("rb") as handle:
         with LasReader(handle, waveform_mode=WaveformMode.LAZY) as reader:
-            with pytest.raises(ValueError, match="external"):
+            with pytest.raises(ValueError, match="65535"):
                 reader.read_points(1)
 
 

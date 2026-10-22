@@ -11,6 +11,10 @@ from .header import LasHeader
 from .point import dims
 from .point.record import PackedPointRecord, ScaleAwarePointRecord
 from .vlrs.vlrlist import VLRList
+from .waveform.utils import (
+    WAVEFORM_PACKET_EVLR_RECORD_ID,
+    WAVEFORM_PACKET_EVLR_USER_ID,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -181,7 +185,18 @@ class LasWriter:
             self.point_writer.done()
             self.done = True
             self.header.number_of_evlrs = len(evlrs)
-            self.header.start_of_first_evlr = self.dest.tell()
+            evlr_start = self.dest.tell()
+            self.header.start_of_first_evlr = evlr_start
+
+            evlr_position = evlr_start
+            for evlr in evlrs:
+                if (
+                    evlr.user_id == WAVEFORM_PACKET_EVLR_USER_ID
+                    and evlr.record_id == WAVEFORM_PACKET_EVLR_RECORD_ID
+                ):
+                    self.header.start_of_waveform_data_packet_record = evlr_position
+                evlr_position += 60 + len(evlr.record_data_bytes())
+
             evlrs.write_to(self.dest, as_extended=True)
 
     def close(self) -> None:

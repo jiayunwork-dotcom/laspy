@@ -32,8 +32,8 @@ opt in).
    Do not load waveform samples.
 
 ``fullwave="lazy"``
-   Keep waveform samples in the external ``.wdp`` file until
-   ``points["waveform"]`` is accessed.
+   Keep waveform samples in their storage (external ``.wdp`` file or the
+   internal EVLR) until ``points["waveform"]`` is accessed.
 
 ``fullwave="eager"``
    Load waveform samples while reading points.
@@ -41,8 +41,26 @@ opt in).
 Writing
 -------
 
-When waveform data is present, writing to a filesystem path will emit a sibling
-``.wdp`` file next to the ``.las`` or ``.laz`` file.
+Waveform packet location is selected with the global encoding flags:
+
+- ``header.global_encoding.waveform_data_packets_internal = True`` and
+  ``waveform_data_packets_external = False`` stores the packets inside the
+  LAS/LAZ file, in an EVLR with User ID ``LASF_Spec`` and Record ID 65535.
+  This requires LAS 1.4. No sibling ``.wdp`` file is created.
+- Any other flag combination with points carrying waveforms writes the
+  packets to a sibling ``.wdp`` file next to the ``.las`` or ``.laz`` file.
+  If both flags are set, the external ``.wdp`` file is used.
+- When none of the points carry a waveform, both flags are cleared and no
+  waveform data is written.
+
+For internal storage, per-point ``wavepacket_offset`` values are relative to
+the start of the waveform EVLR header, so the first packet starts at offset
+60. The header's ``start_of_waveform_data_packet_record`` points at the
+waveform EVLR header, which may sit anywhere among the other EVLRs; existing
+EVLRs are preserved.
+
+When waveform data is present, writing to a filesystem path emits either the
+embedded EVLR or the sibling ``.wdp`` file, depending on the flags above.
 
 Writing waveform-enabled data to a file-like object is not supported.
 
@@ -52,6 +70,7 @@ Current Scope
 The current implementation supports:
 
 - External waveform storage in a sibling ``.wdp`` file.
+- Internal waveform storage in the ``LASF_Spec``/65535 EVLR (LAS 1.4).
 - Uncompressed waveform packets only.
 - Byte-aligned sample widths only.
 - A single waveform layout across all waveform descriptors in the file.
@@ -64,7 +83,6 @@ The LAS 1.4 specification allows more than the current implementation supports.
 laspy currently raises ``NotImplementedError`` or ``ValueError`` for these
 cases.
 
-- Internal waveform storage in the LAS EVLR area is not supported.
 - Non-byte-aligned waveform sample widths are not supported.
 - Multiple waveform descriptor layouts in one file are not supported.
 - General byte-offset-based packet layouts are not supported when they do not

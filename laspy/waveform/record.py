@@ -31,6 +31,13 @@ class IWaveformReader(abc.ABC):
     @abc.abstractmethod
     def wave_size_bytes(self) -> int: ...
 
+    #: Point wavepacket_offset value corresponding to the first byte of the
+    #: underlying source. None means it is inferred from the point offsets
+    #: (legacy external .wdp behaviour).
+    @property
+    def offset_origin(self) -> int | None:
+        return None
+
     @abc.abstractmethod
     def read_n_waveforms(self, n: int) -> bytearray: ...
 
@@ -70,6 +77,7 @@ class WaveformRecord:
         cls,
         points_array: np.ndarray,
         waveform_reader: IWaveformReader,
+        offset_origin: int | None = None,
     ) -> tuple["WaveformRecord", np.ndarray[Any, np.dtype[np.int64]]]:
         wave_dtype = waveform_reader.wave_dtype
         temporal_sample_spacing = waveform_reader.temporal_sample_spacing
@@ -105,7 +113,10 @@ class WaveformRecord:
 
         offsets = np.asarray(points_array["wavepacket_offset"], dtype=np.uint64)
         unique_indices, inverse_indices = deduplicate_waveform_indices(
-            offsets, has_waveform_mask, waveform_size
+            offsets,
+            has_waveform_mask,
+            waveform_size,
+            offset_origin=offset_origin,
         )
 
         runs = iter_runs(unique_indices)

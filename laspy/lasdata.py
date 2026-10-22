@@ -14,9 +14,16 @@ from .laswriter import LasWriter
 from .point import ExtraBytesParams, PointFormat, record
 from .point.dims import ScaledArrayView, SubFieldView
 from .point.record import DimensionNameValidity
+from .vlrs.vlr import VLR
 from .vlrs.vlrlist import VLRList
 from .waveform import WaveformRecord
-from .waveform.utils import deduplicate_waveform_indices, iter_runs
+from .waveform.utils import (
+    EVLR_HEADER_SIZE,
+    WAVEFORM_PACKET_EVLR_RECORD_ID,
+    WAVEFORM_PACKET_EVLR_USER_ID,
+    deduplicate_waveform_indices,
+    iter_runs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -325,6 +332,26 @@ class LasData:
             self.points.array["wavepacket_offset"] = offsets
             self.points.array["wavepacket_size"] = sizes
             self._set_waveform_storage_flags(False)
+            self._drop_waveform_evlr()
+            return
+
+        if self._is_internal_waveform_storage():
+            match self.points._waveform_state:
+                case record.LazyWaveformState() as lazy_state:
+                    self._write_internal_waveforms_lazy(
+                        lazy_state=lazy_state,
+                        has_waveform_mask=has_waveform_mask,
+                        chunksize=waveform_chunksize,
+                    )
+                case record.EagerWaveformState() as eager_state:
+                    self._write_internal_waveforms_eager(
+                        has_waveform_mask,
+                        eager_state=eager_state,
+                    )
+                case None:
+                    raise RuntimeError(
+                        "Internal error: _write_waveforms called without waveform state"
+                    )
             return
 
         match self.points._waveform_state:
@@ -346,6 +373,134 @@ class LasData:
                 raise RuntimeError(
                     "Internal error: _write_waveforms called without waveform state"
                 )
+
+    def _is_internal_waveform_storage(self) -> bool:
+        global_encoding = self.header.global_encoding
+        return (
+            global_encoding.waveform_data_packets_internal
+            and not global_encoding.waveform_data_packets_external
+        )
+
+    def _require_internal_waveform_version(self) -> None:
+        if self.header.version.minor < 4:
+            raise ValueError("Internal waveform packets require LAS 1.4 (EVLR storage)")
+
+    def _write_internal_waveforms_eager(
+        self,
+        has_waveform_mask: NDArray[np.bool],
+        *,
+        eager_state: record.EagerWaveformState,
+    ) -> None:
+        self._require_internal_waveform_version()
+        waveforms = eager_state.waveforms
+        points_waveform_index = eager_state.points_waveform_index
+        wave_size_bytes = waveforms.wave_size
+
+        offsets = np.zeros(len(self.points), dtype=np.uint64)
+        offsets[has_waveform_mask] = (
+            np.asarray(points_waveform_index[has_waveform_mask], dtype=np.uint64)
+            * wave_size_bytes
+            + EVLR_HEADER_SIZE
+        )
+        self.points.array["wavepacket_offset"] = offsets
+
+        samples = np.ascontiguousarray(waveforms.samples)
+        self._finalize_internal_waveform_write(
+            has_waveform_mask, wave_size_bytes, bytes(memoryview(samples))
+        )
+
+    def _write_internal_waveforms_lazy(
+        self,
+        *,
+        lazy_state: record.LazyWaveformState,
+        has_waveform_mask: NDArray[np.bool],
+        chunksize: int,
+    ) -> None:
+        self._require_internal_waveform_version()
+        waveform_reader = lazy_state.reader
+        waveform_size = waveform_reader.wave_size_bytes
+        self._validate_waveform_sizes(has_waveform_mask, waveform_size)
+        points_per_chunk = self._points_per_chunk(waveform_size, chunksize)
+
+        current_offsets = np.asarray(
+            self.points.array["wavepacket_offset"], dtype=np.uint64
+        )
+        unique_indices, inverse_indices = deduplicate_waveform_indices(
+            current_offsets,
+            has_waveform_mask,
+            waveform_size,
+            offset_origin=getattr(waveform_reader, "offset_origin", None),
+        )
+
+        packet_data = bytearray()
+        for run_start, run_end in iter_runs(unique_indices):
+            count = int(run_end - run_start + 1)
+            waveform_reader.seek(run_start)
+            while count > 0:
+                chunk_count = min(points_per_chunk, count)
+                packet_data.extend(waveform_reader.read_n_waveforms(int(chunk_count)))
+                count -= chunk_count
+
+        offsets = np.zeros(len(self.points), dtype=np.uint64)
+        offsets[has_waveform_mask] = (
+            inverse_indices.astype(np.uint64) * waveform_size + EVLR_HEADER_SIZE
+        )
+        self.points.array["wavepacket_offset"] = offsets
+
+        self._finalize_internal_waveform_write(
+            has_waveform_mask, waveform_size, bytes(packet_data)
+        )
+
+    def _finalize_internal_waveform_write(
+        self,
+        has_waveform_mask: NDArray[np.bool],
+        waveform_size: int,
+        packet_data: bytes,
+    ) -> None:
+        size_dtype = self.points.array["wavepacket_size"].dtype
+        sizes = np.zeros(len(self.points), dtype=size_dtype)
+        sizes[has_waveform_mask] = waveform_size
+        self.points.array["wavepacket_size"] = sizes
+
+        global_encoding = self.header.global_encoding
+        global_encoding.waveform_data_packets_internal = True
+        global_encoding.waveform_data_packets_external = False
+        if self.header.version.minor >= 3:
+            # The actual position is set when the EVLRs are written
+            self.header.start_of_waveform_data_packet_record = 0
+
+        self._attach_waveform_evlr(packet_data)
+
+    def _drop_waveform_evlr(self) -> None:
+        evlrs = self.header.evlrs
+        if evlrs is None:
+            return
+        kept = [
+            vlr
+            for vlr in evlrs
+            if not (
+                vlr.user_id == WAVEFORM_PACKET_EVLR_USER_ID
+                and vlr.record_id == WAVEFORM_PACKET_EVLR_RECORD_ID
+            )
+        ]
+        if len(kept) != len(evlrs):
+            evlrs.clear()
+            evlrs.extend(kept)
+
+    def _attach_waveform_evlr(self, packet_data: bytes) -> None:
+        evlrs = self.header.evlrs
+        if evlrs is None:
+            evlrs = VLRList()
+            self.header.evlrs = evlrs
+        self._drop_waveform_evlr()
+        evlrs.append(
+            VLR(
+                WAVEFORM_PACKET_EVLR_USER_ID,
+                WAVEFORM_PACKET_EVLR_RECORD_ID,
+                "Waveform data packets",
+                packet_data,
+            )
+        )
 
     def _write_wdp_eager(
         self,
@@ -466,6 +621,7 @@ class LasData:
         self.points.array["wavepacket_size"] = sizes
 
         self._set_waveform_storage_flags(bool(has_waveform_mask.any()))
+        self._drop_waveform_evlr()
 
     def _set_waveform_storage_flags(self, has_waveforms: bool) -> None:
         self.header.global_encoding.waveform_data_packets_external = has_waveforms
