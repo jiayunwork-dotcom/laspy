@@ -4,6 +4,12 @@ from typing import BinaryIO, Iterable, Optional, Union
 
 from ._pointwriter import IPointWriter
 from .compression import LazBackend
+from .coordinate import (
+    CoordinateGrid,
+    CoordinateGuard,
+    resolve_coordinate_guard,
+    validate_target_grid,
+)
 from .errors import LaspyException
 from .header import LasHeader
 from .point import dims
@@ -26,6 +32,7 @@ class LasWriter:
         laz_backend: Optional[Union[LazBackend, Iterable[LazBackend]]] = None,
         closefd: bool = True,
         encoding_errors: str = "strict",
+        coordinate_guard=None,
     ) -> None:
         """
         Parameters
@@ -52,6 +59,21 @@ class LasWriter:
             How encoding errors should be treated.
             Possible values and their explanation can be seen here:
             https://docs.python.org/3/library/codecs.html#error-handlers.
+
+        coordinate_guard: bool, number, sequence of 3 numbers or CoordinateGuard, optional
+            Enables the coordinate precision guard (default: disabled).
+
+            When enabled, every point record given to :meth:`write_points` must
+            be a :class:`laspy.ScaleAwarePointRecord`, i.e. it must carry the
+            scales and offsets of its source.  Its coordinates are re-quantized
+            onto the grid of this writer's header before being written.
+
+            ``True`` uses the header scales as the per-axis maximum error (one
+            grid step).  A number or a sequence of three numbers sets the
+            maximum error per axis explicitly.  A :class:`laspy.CoordinateGrid`
+            or :class:`laspy.CoordinateGuard` can also be given.  A whole batch
+            is rejected if one of its points cannot be stored within the error
+            budget, and nothing is written for that batch.
         """
         self.closefd = closefd
         self.encoding_errors = encoding_errors
@@ -67,6 +89,27 @@ class LasWriter:
 
         self.dest = dest
         self.done = False
+        self.coordinate_guard: Optional[CoordinateGuard] = None
+
+        if isinstance(coordinate_guard, CoordinateGrid):
+            # The caller derived a grid with make_coordinate_grid() for a new
+            # file: this writer defines the file header, so the grid is
+            # applied to it.  The caller's header object is not modified.
+            coordinate_guard.apply_to(self.header)
+            if coordinate_guard.max_errors is not None:
+                coordinate_guard = CoordinateGuard.from_grid(coordinate_guard)
+            else:
+                coordinate_guard = True
+
+        if coordinate_guard is not None and coordinate_guard is not False:
+            # Normalize and validate the header grid once, before writing the
+            # file header.
+            self.header.scales, self.header.offsets = validate_target_grid(
+                self.header.scales, self.header.offsets
+            )
+            self.coordinate_guard = resolve_coordinate_guard(
+                coordinate_guard, self.header.scales, self.header.offsets
+            )
 
         dims.raise_if_version_not_compatible_with_fmt(
             header.point_format.id, str(self.header.version)
@@ -112,6 +155,11 @@ class LasWriter:
         LaspyException
             If the point format of the points does not match
             the point format of the writer.
+
+        CoordinatePrecisionError
+            When the coordinate guard is enabled and the batch cannot be
+            stored on the writer's coordinate grid (see
+            :mod:`laspy.coordinate`).  The whole batch is rejected.
         """
         if not points:
             return
@@ -119,7 +167,17 @@ class LasWriter:
         if self.done:
             raise LaspyException("Cannot write points anymore")
 
-        if points.point_format != self.header.point_format:
+        points_to_write = points
+        if self.coordinate_guard is not None:
+            # Validation happens before any state is mutated: a rejected batch
+            # leaves both the header statistics and the file untouched.
+            points_to_write = self.coordinate_guard.convert_points(
+                points,
+                self.header.point_format,
+                self.header.scales,
+                self.header.offsets,
+            )
+        elif points.point_format != self.header.point_format:
             raise LaspyException("Incompatible point formats")
 
         if self.header.max_point_count() - self.header.point_count < len(points):
@@ -130,8 +188,8 @@ class LasWriter:
                 )
             )
 
-        self.header.grow(points)
-        self.point_writer.write_points(points)
+        self.header.grow(points_to_write)
+        self.point_writer.write_points(points_to_write)
 
     def write_evlrs(self, evlrs: VLRList) -> None:
         """Writes the EVLRs to the file

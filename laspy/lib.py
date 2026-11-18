@@ -33,6 +33,7 @@ def open_las(
     encoding_errors: str = "strict",
     read_evlrs: bool = True,
     decompression_selection: DecompressionSelection = DecompressionSelection.all(),
+    coordinate_guard=None,
 ) -> Union[LasReader, LasWriter, LasAppender]:
     """The laspy.open opens a LAS/LAZ file in one of the 3 supported
     mode:
@@ -126,6 +127,32 @@ def open_las(
 
     .. versionadded:: 2.4
         The ``read_evlrs`` and ``decompression_selection`` parameters.
+
+    coordinate_guard: bool, number, sequence of 3 numbers, CoordinateGrid or CoordinateGuard, optional
+        Enables the coordinate precision guard in 'w' and 'a' mode
+        (default: disabled, the historic behaviour is kept).
+
+        With the guard enabled, point records given to ``write_points`` /
+        ``append_points`` must be :class:`laspy.ScaleAwarePointRecord`
+        instances carrying their source scales and offsets.  Their coordinates
+        are re-quantized onto the target header's grid, so batches coming from
+        different source grids land where they should.
+
+        - ``True``: the per-axis maximum error is the target grid's scale.
+        - a number or three numbers: the explicit per-axis maximum error.
+        - in 'w' mode only, a :class:`laspy.CoordinateGrid` (typically built
+          with :func:`laspy.make_coordinate_grid`) also defines the header's
+          scales and offsets.
+        - in 'a' mode, a :class:`laspy.CoordinateGrid` must match the grid
+          already stored in the file, which is never modified.
+
+        A batch is validated as a whole before anything is written.  If one
+        point cannot be stored (missing source grid, mismatched point format,
+        integer overflow, or a re-quantization error above the budget), none
+        of its points are written and the header statistics are unchanged.
+        Subsequent valid batches can still be written.
+
+        .. versionadded:: 2.6
     """
     if mode == "r":
         if header is not None:
@@ -137,6 +164,11 @@ def open_las(
             raise LaspyException(
                 "do_compress argument is not used when opening in read mode, "
                 "did you meant to open in write mode ?"
+            )
+        if coordinate_guard is not None and coordinate_guard is not False:
+            raise LaspyException(
+                "coordinate_guard argument is not used when opening in read mode, "
+                "did you meant to open in write or append mode ?"
             )
         if isinstance(source, (str, Path)):
             stream = open(source, mode="rb", closefd=closefd)
@@ -178,6 +210,7 @@ def open_las(
                 laz_backend=laz_backend,
                 closefd=closefd,
                 encoding_errors=encoding_errors,
+                coordinate_guard=coordinate_guard,
             )
         except:
             if closefd:
@@ -197,6 +230,7 @@ def open_las(
                 closefd=closefd,
                 laz_backend=laz_backend,
                 encoding_errors=encoding_errors,
+                coordinate_guard=coordinate_guard,
             )
         except:
             if closefd:

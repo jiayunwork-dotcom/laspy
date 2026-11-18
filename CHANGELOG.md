@@ -1,5 +1,26 @@
 # Changelog
 
+## Version 2.6.0 (unreleased)
+
+### Added
+
+- `laspy.make_coordinate_grid(mins, maxs, max_errors)` derives the scales
+  and offsets of a LAS header from per-axis coordinate intervals and
+  per-axis maximum absolute errors.  The derivation is deterministic, uses
+  the full signed 32 bit integer range (with a safety margin), centres the
+  offsets on the intervals, and rejects reversed/non-finite intervals,
+  non-positive or non-finite tolerances and ranges that cannot be represented
+  within the error budget.
+- Opt-in coordinate precision guard for `laspy.open`:
+  `laspy.open(..., coordinate_guard=...)` in `"w"` and `"a"` mode.
+  Scale-aware point records coming from any source grid are re-quantized onto
+  the destination grid before being written.  Batches that cannot be stored
+  within the error budget (missing source grid, point format mismatch,
+  int32 overflow, non-finite coordinates, out-of-bounds coordinates or
+  precision loss) are rejected in full, leaving the file and the header
+  statistics untouched, and the session can keep accepting valid batches.
+  The default (`None`) keeps the historic behaviour.
+
 ## Version 2.5.4 (19/06/2024)
 
 ### Fixed

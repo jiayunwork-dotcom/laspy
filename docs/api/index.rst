@@ -26,6 +26,11 @@ _____________
 
 .. autofunction:: convert
 
+laspy.make_coordinate_grid
+___________________________
+
+.. autofunction:: make_coordinate_grid
+
 
 Re-exported classes
 -------------------
@@ -40,6 +45,8 @@ Re-exported classes
  - :class:`.LasAppender`
  - :class:`.PackedPointRecord`
  - :class:`.ScaleAwarePointRecord`
+ - :class:`.CoordinateGrid`
+ - :class:`.CoordinateGuard`
  - :class:`.CopcReader`
 
 
@@ -63,4 +70,5 @@ Submodules
    laspy.lasmmap
    laspy.lasappender
    laspy.laswriter
+   laspy.coordinate
 

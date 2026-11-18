@@ -3,6 +3,13 @@ from typing import BinaryIO, Iterable, Optional, Union
 
 from ._pointappender import IPointAppender
 from .compression import LazBackend
+from .coordinate import (
+    CoordinateGrid,
+    CoordinateGuard,
+    ensure_grid_matches,
+    resolve_coordinate_guard,
+    validate_target_grid,
+)
 from .errors import LaspyException
 from .header import LasHeader
 from .point.record import PackedPointRecord
@@ -21,6 +28,7 @@ class LasAppender:
         laz_backend: Optional[Union[LazBackend, Iterable[LazBackend]]] = None,
         closefd: bool = True,
         encoding_errors: str = "strict",
+        coordinate_guard=None,
     ) -> None:
         if not dest.seekable():
             raise TypeError("Expected the 'dest' to be a seekable file object")
@@ -32,6 +40,20 @@ class LasAppender:
 
         self.dest = dest
         self.header = header
+        self.coordinate_guard: Optional[CoordinateGuard] = None
+
+        if coordinate_guard is not None and coordinate_guard is not False:
+            # The grid to use is the one already stored in the file: it is
+            # never modified by an append session.
+            if isinstance(coordinate_guard, CoordinateGrid):
+                ensure_grid_matches(
+                    coordinate_guard, header.scales, header.offsets, "file"
+                )
+
+            self.coordinate_guard = resolve_coordinate_guard(
+                coordinate_guard, header.scales, header.offsets
+            )
+            validate_target_grid(header.scales, header.offsets, "file")
 
         if not header.are_points_compressed:
             self.points_appender = UncompressedPointAppender(self.dest)
@@ -65,9 +87,26 @@ class LasAppender:
         must have the same point format as the points
         already contained within the file.
 
+        When the coordinate guard is enabled, the points must be a
+        :class:`laspy.ScaleAwarePointRecord` carrying their source grid.
+        Their coordinates are re-quantized onto the grid already stored in
+        the file.  A batch is rejected in full if one of its points cannot be
+        stored within the error budget; the file and its header statistics are
+        then left untouched.
+
         :param points: The points to append
         """
-        if points.point_format != self.header.point_format:
+        points_to_append = points
+        if self.coordinate_guard is not None:
+            # Validate and convert before touching anything: a rejected batch
+            # must not write a single point nor grow the header's statistics.
+            points_to_append = self.coordinate_guard.convert_points(
+                points,
+                self.header.point_format,
+                self.header.scales,
+                self.header.offsets,
+            )
+        elif points.point_format != self.header.point_format:
             raise LaspyException("Point formats do not match")
 
         if self.header.max_point_count() - self.header.point_count < len(points):
@@ -78,8 +117,8 @@ class LasAppender:
                 )
             )
 
-        self.points_appender.append_points(points)
-        self.header.grow(points)
+        self.points_appender.append_points(points_to_append)
+        self.header.grow(points_to_append)
 
     def close(self) -> None:
         self.points_appender.done()

@@ -1,7 +1,8 @@
-from typing import BinaryIO, Iterable, Literal, Optional, Union, overload
+from typing import BinaryIO, Iterable, Literal, Optional, Sequence, Union, overload
 
 from . import LasWriter, PointFormat
 from .compression import DecompressionSelection, LazBackend
+from .coordinate import CoordinateGrid, CoordinateGuard
 from .header import LasHeader
 from .lasappender import LasAppender
 from .lasdata import LasData
@@ -12,6 +13,10 @@ from .typehints import PathLike
 LazBackend = LazBackend
 DecompressionSelection = DecompressionSelection
 
+CoordinateGuardLike = Union[
+    bool, float, Sequence[float], CoordinateGrid, CoordinateGuard, None
+]
+
 @overload
 def open_las(
     source: PathLike,
@@ -32,6 +37,7 @@ def open_las(
     header: LasHeader,
     do_compress: Optional[bool] = ...,
     laz_backend: Union[LazBackend, Iterable[LazBackend]] = ...,
+    coordinate_guard: CoordinateGuardLike = ...,
 ) -> LasWriter: ...
 @overload
 def open_las(
@@ -41,12 +47,14 @@ def open_las(
     do_compress: Optional[bool] = ...,
     closefd: bool = ...,
     laz_backend: Union[LazBackend, Iterable[LazBackend]] = ...,
+    coordinate_guard: CoordinateGuardLike = ...,
 ) -> LasWriter: ...
 @overload
 def open_las(
     source: PathLike,
     mode: Literal["a"],
     laz_backend: Union[LazBackend, Iterable[LazBackend]] = ...,
+    coordinate_guard: CoordinateGuardLike = ...,
 ) -> LasAppender: ...
 @overload
 def open_las(
@@ -54,6 +62,7 @@ def open_las(
     mode: Literal["a"],
     closefd: bool = ...,
     laz_backend: Union[LazBackend, Iterable[LazBackend]] = ...,
+    coordinate_guard: CoordinateGuardLike = ...,
 ) -> LasAppender: ...
 def read_las(
     source: Union[BinaryIO, PathLike],

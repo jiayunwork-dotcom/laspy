@@ -3,8 +3,24 @@ __version__ = "2.5.4"
 import logging
 
 from . import errors, file, vlrs
+from .coordinate import CoordinateGrid, CoordinateGuard, make_coordinate_grid
 from .copc import Bounds, CopcReader
-from .errors import LaspyException
+from .errors import (
+    CoordinateGridError,
+    CoordinateIntegerOverflow,
+    CoordinateOutOfBounds,
+    CoordinatePrecisionError,
+    CoordinatePrecisionExceeded,
+    CoordinateRangeTooPrecise,
+    IncompatiblePointFormat,
+    InvalidCoordinateBounds,
+    InvalidCoordinateTolerance,
+    InvalidSourceGrid,
+    InvalidTargetGrid,
+    LaspyException,
+    MissingSourceGrid,
+    NonFiniteCoordinate,
+)
 from .header import LasHeader
 from .lasdata import LasData
 from .lasreader import LasReader
