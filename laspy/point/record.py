@@ -129,10 +129,21 @@ class PackedPointRecord:
         return cls(data, point_format)
 
     def copy_fields_from(self, other_record: "PackedPointRecord") -> None:
-        """Tries to copy the values of the current dimensions from other_record"""
+        """Tries to copy the values of the current dimensions from other_record
+
+        The copy is done on the raw (unscaled) values whenever possible, so
+        that sentinel values such as `no_data` are preserved bit for bit and
+        never round-trip through a scaled floating point representation.
+        """
         for dim_name in self.point_format.dimension_names:
             try:
-                self[dim_name] = np.array(other_record[dim_name])
+                if (
+                    dim_name in self.array.dtype.names
+                    and dim_name in other_record.array.dtype.names
+                ):
+                    self.array[dim_name] = other_record.array[dim_name]
+                else:
+                    self[dim_name] = np.array(other_record[dim_name])
             except ValueError:
                 pass
 

@@ -20,6 +20,18 @@ class LasAppender:
     """Allows to append points to and existing LAS/LAZ file.
 
     Appending to LAZ is only supported by the lazrs backend
+
+    Extra bytes statistics
+    ----------------------
+    When the file advertises the min/max of an extra dimension, those
+    values are trusted: the appended batches are merged into them and the
+    points already stored in the file are never read again. When a file
+    does not advertise them, they stay unknown after the append; they are
+    not replaced by the extrema of the newly appended batch, which would
+    wrongly present that batch as describing the whole file. Reconstructing
+    them would require reading every existing point (a potentially large
+    amount of I/O, done silently), so this is left to the caller if the
+    statistics are needed.
     """
 
     def __init__(
@@ -41,6 +53,15 @@ class LasAppender:
         self.dest = dest
         self.header = header
         self.coordinate_guard: Optional[CoordinateGuard] = None
+
+        # The statistics already stored in the file are trusted and are the
+        # starting point of the merge. The old points are not read again.
+        try:
+            eb_vlr = header.vlrs.get("ExtraBytesVlr")[0]
+        except IndexError:
+            pass
+        else:
+            eb_vlr.restart_tracking()
 
         if coordinate_guard is not None and coordinate_guard is not False:
             # The grid to use is the one already stored in the file: it is
@@ -123,6 +144,10 @@ class LasAppender:
     def close(self) -> None:
         self.points_appender.done()
         self._write_evlrs()
+        # The statistics stored in the file are trusted and the new batches
+        # were merged into them, but a component which never had a valid
+        # value must not advertise its optional extrema as known.
+        self.header.finalize_extra_bytes_statistics()
         self._write_updated_header()
 
         if self.closefd:

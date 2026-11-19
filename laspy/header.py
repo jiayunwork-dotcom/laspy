@@ -475,13 +475,26 @@ class LasHeader:
         self.point_count = 0
         self.number_of_points_by_return = np.zeros(15, dtype=np.uint32)
 
+        try:
+            eb_vlr = self._vlrs.get("ExtraBytesVlr")[0]
+        except IndexError:
+            pass
+        else:
+            eb_vlr.partial_reset()
+
     def update(self, points: PackedPointRecord) -> None:
         self.partial_reset()
         if not points:
+            # With no point there is nothing to compute the statistics from;
+            # leave the relevance flags as they are rather than turning
+            # them off (an empty data set is not a proof that a component
+            # never has a valid value, and this header may still be used to
+            # write points in chunks).
             self.maxs = [0.0, 0.0, 0.0]
             self.mins = [0.0, 0.0, 0.0]
         else:
             self.grow(points)
+            self.finalize_extra_bytes_statistics()
 
     def grow(self, points: PackedPointRecord) -> None:
         self.x_max = max(
@@ -518,6 +531,27 @@ class LasHeader:
                 break  # np.unique sorts unique values
             self.number_of_points_by_return[return_number - 1] += count
         self.point_count += len(points)
+
+        try:
+            eb_vlr = self._vlrs.get("ExtraBytesVlr")[0]
+        except IndexError:
+            pass
+        else:
+            eb_vlr.grow(points)
+
+    def finalize_extra_bytes_statistics(self) -> None:
+        """Make the relevance flags of the Extra Bytes descriptors agree
+        with the values that were actually seen.
+
+        A component for which no valid value was found must not advertise
+        its optional min/max as known.
+        """
+        try:
+            eb_vlr = self._vlrs.get("ExtraBytesVlr")[0]
+        except IndexError:
+            pass
+        else:
+            eb_vlr.finalize()
 
     def set_compressed(self, state: bool) -> None:
         self.are_points_compressed = state
@@ -918,6 +952,16 @@ class LasHeader:
         return header_bytes + rest
 
     def _sync_extra_bytes_vlr(self) -> None:
+        # Keep the descriptors that are already present so that the
+        # statistics (and their relevance flags) of the dimensions which
+        # survive a modification are not lost.
+        previous_structs: typing.Dict[str, typing.List[ExtraBytesStruct]] = {}
+        for eb_vlr in self._vlrs.get("ExtraBytesVlr"):
+            for eb_struct in eb_vlr.extra_bytes_structs:
+                previous_structs.setdefault(eb_struct.format_name(), []).append(
+                    eb_struct
+                )
+
         try:
             self._vlrs.extract("ExtraBytesVlr")
         except IndexError:
@@ -932,20 +976,28 @@ class LasHeader:
             dtype = extra_dimension.dtype
             assert dtype is not None
 
+            if extra_dimension.num_elements > 3 and dtype.base == np.uint8:
+                data_type = (0, extra_dimension.num_elements)
+            else:
+                data_type = extradims.get_id_for_extra_dim_type(dtype)
+
             eb_struct = ExtraBytesStruct(
                 name=extra_dimension.name.encode(),
                 description=extra_dimension.description.encode(),
+                data_type=data_type,
+                scale=extra_dimension.scales,
+                offset=extra_dimension.offsets,
+                no_data=extra_dimension.no_data,
             )
 
-            if extra_dimension.num_elements > 3 and dtype.base == np.uint8:
-                type_id = 0
-                eb_struct.options = extra_dimension.num_elements
-            else:
-                type_id = extradims.get_id_for_extra_dim_type(dtype)
-
-            eb_struct.data_type = type_id
-            eb_struct.scale = extra_dimension.scales
-            eb_struct.offset = extra_dimension.offsets
+            previous = previous_structs.get(extra_dimension.name, [])
+            previous = previous.pop(0) if previous else None
+            if previous is not None and previous.data_type == eb_struct.data_type:
+                # The field is unchanged: keep the statistics and the
+                # no_data relevance that were computed / read before.
+                eb_struct._copy_statistics_from(previous)
+                if previous.no_data_is_relevant():
+                    eb_struct.no_data = previous.no_data
 
             eb_vlr.extra_bytes_structs.append(eb_struct)
 

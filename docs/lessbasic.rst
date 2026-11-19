@@ -75,6 +75,43 @@ and an array field of 3 doubles for each points.
    as it is more efficient (it allows to allocate all the dimensions at once instead
    of re-allocating each time a new dimension is added.
 
+No data, minima and maxima
+--------------------------
+
+An extra dimension may declare a special value meaning "no data":
+
+.. code-block:: python
+
+    las.add_extra_dim(laspy.ExtraBytesParams(
+        name="echo_width",
+        type="u2",
+        no_data=np.array([65535], dtype=np.uint16),
+    ))
+
+The no_data values are stored in the Extra Bytes descriptor of the file.
+One value per element is expected (so a ``3i4`` dimension takes three
+values). The value is kept in the *raw* form of the field, i.e. before any
+scale and offset is applied.
+
+When writing, laspy fills the optional ``min`` and ``max`` of the
+descriptor. Those are computed per element, on the raw values, excluding
+the no_data value (and NaNs for floating point fields). If a given element
+never has a valid value, the corresponding optional statistic is not
+marked as known. Chunked writes give the same result whatever the chunk
+boundaries are, and the statistics do not depend on the number of points
+already written.
+
+When appending, the statistics already stored in the file are trusted and
+merged with the appended points. If the file did not provide them, they
+remain unknown rather than being replaced by the statistics of the newly
+appended points only.
+
+.. note::
+
+   ``min`` and ``max`` are decoded and exposed by laspy with the scale and
+   offset of the dimension applied; the file itself stores them unscaled,
+   as required by the specification.
+
 
 Custom VLRs
 ===========

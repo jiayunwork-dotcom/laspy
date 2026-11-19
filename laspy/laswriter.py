@@ -230,6 +230,11 @@ class LasWriter:
                 self.header.maxs = [0.0, 0.0, 0.0]
                 self.header.mins = [0.0, 0.0, 0.0]
 
+            # Only the statistics of the batches that were actually written
+            # are kept. A component that never had a valid value in those
+            # batches must not advertise its optional extrema as known.
+            self.header.finalize_extra_bytes_statistics()
+
             self.point_writer.write_updated_header(self.header, self.encoding_errors)
         if self.closefd:
             self.dest.close()

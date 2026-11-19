@@ -326,6 +326,12 @@ def num_bit_set(n: int) -> int:
     return count
 
 
+def _arrays_equal(first: Optional[np.ndarray], second: Optional[np.ndarray]) -> bool:
+    if first is None or second is None:
+        return first is None and second is None
+    return np.array_equal(np.asarray(first), np.asarray(second))
+
+
 class DimensionInfo(NamedTuple):
     """Tuple that contains information of a dimension"""
 
@@ -337,6 +343,7 @@ class DimensionInfo(NamedTuple):
     description: str = ""
     offsets: Optional[np.ndarray] = None
     scales: Optional[np.ndarray] = None
+    no_data: Optional[np.ndarray] = None
 
     @classmethod
     def from_extra_bytes_param(cls, params):
@@ -349,6 +356,7 @@ class DimensionInfo(NamedTuple):
             params.description,
             params.offsets,
             params.scales,
+            params.no_data,
         )
         me._validate()
         return me
@@ -451,10 +459,12 @@ class DimensionInfo(NamedTuple):
             self.name == other.name
             and self.kind == other.kind
             and self.num_bits == other.num_bits
+            and self.num_elements == other.num_elements
             and self.is_standard == other.is_standard
             and self.description == other.description
-            and np.all(self.offsets == other.offsets)
-            and np.all(self.scales == other.scales)
+            and _arrays_equal(self.offsets, other.offsets)
+            and _arrays_equal(self.scales, other.scales)
+            and _arrays_equal(self.no_data, other.no_data)
         )
 
     def __ne__(self, other: "DimensionInfo") -> bool:
@@ -474,6 +484,11 @@ class DimensionInfo(NamedTuple):
         if self.scales is not None and len(self.scales) != self.num_elements:
             raise ValueError(
                 f"len(scales) ({len(self.scales)}) is not the same as the number of elements ({self.num_elements})"
+            )
+
+        if self.no_data is not None and len(self.no_data) != self.num_elements:
+            raise ValueError(
+                f"len(no_data) ({len(self.no_data)}) is not the same as the number of elements ({self.num_elements})"
             )
 
 

@@ -21,6 +21,39 @@
   statistics untouched, and the session can keep accepting valid batches.
   The default (`None`) keeps the historic behaviour.
 
+### Fixed
+
+- Extra Bytes descriptors now honour their `options` flags: the no_data,
+  min and max values are only reported when their respective bit is set
+  (zero is a valid value), and are decoded using the raw encoding of the
+  field (narrow integers are upcast to 64 bit integers of the same
+  signedness, floats to double), so 64 bit values, e.g. a packet sequence
+  number stored as `uint64`, are not altered.
+- The number of values read from an Extra Bytes descriptor always matches
+  the number of elements of the field (1, 2 or 3), instead of mixing in
+  the unused slots.
+- Adding, removing or converting point formats no longer drops the no_data
+  definition, description, scale and offset of the extra dimensions which
+  are kept, and the descriptors stay in the same order as the point
+  record.
+- Extra Bytes min/max are now tracked while writing, on the raw values,
+  per component, excluding the configured no_data value and (for floating
+  point fields) NaNs. A component without any valid value does not
+  advertise its optional extrema as known. Chunked writes produce the same
+  statistics regardless of the chunk boundaries, and the extra memory used
+  for the tracking depends on the field and the batch size, not on the
+  total number of points written.
+- Appending merges the trusted extrema stored on disk with the appended
+  points rather than growing them from scratch, and leaves the existing
+  point bytes and the offset to the point data untouched. When the file
+  did not provide the extrema, they stay unknown: the extrema of the newly
+  appended batch are never presented as the extrema of the whole file.
+  Reading the old points to reconstruct them is deliberately not done (see
+  the `LasAppender` documentation for the trade-off).
+- Extra Bytes fields whose `data_type` is 0 (undocumented bytes) keep
+  being handled as before: their `options` byte is a byte count, not a bit
+  field, and no statistics are computed for them.
+
 ## Version 2.5.4 (19/06/2024)
 
 ### Fixed
