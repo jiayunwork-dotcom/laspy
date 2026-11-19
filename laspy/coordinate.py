@@ -542,7 +542,7 @@ class CoordinateGuard:
                 )
             converted[name] = integers
 
-        return PackedPointRecord(converted, points.point_format)
+        return PackedPointRecord(converted, points.point_format, points.readability)
 
 
 def validate_target_grid(scales, offsets, what: str = "destination header"):

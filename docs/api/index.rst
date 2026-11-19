@@ -45,6 +45,7 @@ Re-exported classes
  - :class:`.LasAppender`
  - :class:`.PackedPointRecord`
  - :class:`.ScaleAwarePointRecord`
+ - :class:`.FieldReadability`
  - :class:`.CoordinateGrid`
  - :class:`.CoordinateGuard`
  - :class:`.CopcReader`
@@ -64,6 +65,7 @@ Submodules
    laspy.vlrs.known
    laspy.vlrs.vlr
    laspy.point.record
+   laspy.point.readability
    laspy.errors
    laspy.compression
    laspy.point.format

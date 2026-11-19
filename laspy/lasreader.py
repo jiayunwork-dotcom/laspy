@@ -10,6 +10,7 @@ from .compression import DecompressionSelection
 from .header import LasHeader
 from .lasdata import LasData
 from .point import record
+from .point.readability import FieldReadability, readable_fields_for_selection
 from .vlrs.vlrlist import VLRList
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,7 @@ class LasReader:
         laz_backend: Optional[Union[LazBackend, Iterable[LazBackend]]] = None,
         read_evlrs: bool = True,
         decompression_selection: DecompressionSelection = DecompressionSelection.all(),
+        strict: bool = False,
     ):
         """
         Initialize the LasReader
@@ -40,9 +42,23 @@ class LasReader:
         decompression_selection: optional, DecompressionSelection
             Selection of fields to decompress, only works form point format >= 6 <= 10
             Ignored on other point formats
+        strict: bool, default False
+            When True, enables strict read mode: point records keep track of
+            the fields that were actually decompressed. Accessing a field
+            that exists in the point format but was skipped by
+            *decompression_selection* raises
+            :class:`laspy.errors.FieldNotReadableError` instead of returning
+            placeholder data. Use :meth:`readable_fields` /
+            :meth:`is_field_readable` to inspect what is available.
+
+            On uncompressed LAS and point formats that do not support
+            selective decompression every field remains readable, so the
+            mode has no observable effect beyond the metadata being present.
 
         .. versionadded:: 2.4
             The ``read_evlrs`` and ``decompression_selection`` parameters.
+        .. versionadded:: 2.6
+            The ``strict`` parameter.
         """
         self.closefd = closefd
         if laz_backend is None:
@@ -50,6 +66,7 @@ class LasReader:
         self.laz_backend = laz_backend
         self.header = LasHeader.read_from(source, read_evlrs=read_evlrs)
         self.decompression_selection = decompression_selection
+        self.strict = strict
 
         # The point source is lazily instanciated.
         # Because some reader implementation may
@@ -60,6 +77,53 @@ class LasReader:
         self._source = source
 
         self.points_read = 0
+        self.readability: Optional[FieldReadability] = self._compute_readability()
+
+    def _supports_selective_decompression(self) -> bool:
+        """Selective decompression only exists for LAZ 1.4 with point
+        formats 6 to 10. On any other backend/format the selection is
+        ignored by the backends, so every field is effectively read."""
+        return (
+            self.header.are_points_compressed
+            and self.header.version.minor >= 4
+            and self.header.point_format.id >= 6
+        )
+
+    def _compute_readability(self) -> Optional[FieldReadability]:
+        if not self.strict:
+            return None
+        if not self._supports_selective_decompression():
+            return FieldReadability.all_readable(self.header.point_format)
+        return FieldReadability(
+            self.header.point_format,
+            readable_fields_for_selection(
+                self.header.point_format, self.decompression_selection
+            ),
+        )
+
+    def readable_fields(self) -> frozenset:
+        """Returns the point field names that records from this reader will
+        expose as readable.
+
+        In strict mode this reflects the decompression selection intersected
+        with the fields of the actual point format; otherwise every field of
+        the format is reported. The query only uses the header and the
+        selection, it never decompresses anything.
+        """
+        if self.readability is None:
+            return FieldReadability.all_readable(
+                self.header.point_format
+            ).readable_fields()
+        return self.readability.readable_fields()
+
+    def is_field_readable(self, field_name: str) -> bool:
+        """Returns whether *field_name* will be readable on the points read
+        by this reader, without reading any point."""
+        if self.readability is None:
+            return FieldReadability.all_readable(self.header.point_format).is_readable(
+                field_name
+            )
+        return self.readability.is_readable(field_name)
 
     @property
     def evlrs(self) -> Optional[VLRList]:
@@ -92,11 +156,13 @@ class LasReader:
         """
         points_left = self.header.point_count - self.points_read
         if points_left <= 0:
-            return record.ScaleAwarePointRecord.empty(
+            empty = record.ScaleAwarePointRecord.empty(
                 self.header.point_format,
                 self.header.scales,
                 self.header.offsets,
             )
+            empty.readability = self.readability
+            return empty
 
         if n < 0:
             n = points_left
@@ -110,7 +176,11 @@ class LasReader:
             logger.error(f"Could only read {len(r)} of the requested {n} points")
 
         points = record.ScaleAwarePointRecord(
-            r.array, r.point_format, self.header.scales, self.header.offsets
+            r.array,
+            r.point_format,
+            self.header.scales,
+            self.header.offsets,
+            readability=self.readability,
         )
 
         self.points_read += n

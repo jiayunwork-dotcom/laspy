@@ -12,6 +12,7 @@ from .header import LasHeader
 from .laswriter import LasWriter
 from .point import ExtraBytesParams, PointFormat, dims, record
 from .point.dims import OLD_LASPY_NAMES, ScaledArrayView, SubFieldView
+from .point.readability import FieldReadability
 from .point.record import DimensionNameValidity
 from .vlrs.vlrlist import VLRList
 
@@ -52,6 +53,7 @@ class LasData:
                 header.point_format,
                 scales=header.scales,
                 offsets=header.offsets,
+                readability=points.readability,
             )
         else:
             assert np.all(header.scales, points.scales)
@@ -65,6 +67,31 @@ class LasData:
         """Shortcut to get the point format"""
         return self.points.point_format
 
+    def is_field_readable(self, field_name: str) -> bool:
+        """Returns whether *field_name* was actually read and can be accessed.
+
+        In strict read mode (see the ``strict`` parameter of
+        :func:`laspy.open`, :func:`laspy.read` and
+        :meth:`laspy.CopcReader.open`) a field may exist in the point format
+        while having been skipped by the selective decompression. Such a
+        field reports ``False`` here and raises
+        :class:`laspy.errors.FieldNotReadableError` when accessed.
+
+        The check is purely informational: it never triggers any reading.
+        Without strict read metadata every field of the format is readable.
+        """
+        return self.points.is_field_readable(field_name)
+
+    def readable_fields(self) -> frozenset:
+        """Returns the names of the point fields that are readable.
+
+        The readability is determined by the backend and point format that
+        were actually used. Uncompressed LAS and point formats without
+        selective decompression expose every field. The query never reads
+        additional data from the source.
+        """
+        return self.points.readable_fields()
+
     @property
     def xyz(self) -> np.ndarray:
         """Returns a **new** 2D numpy array with the x,y,z coordinates
@@ -74,11 +101,17 @@ class LasData:
         >>> xyz = las.xyz
         >>> xyz.ndim
         2
-        >>> xyz.shape
-        (1065, 3)
+        >>> xyz.shape == (1065, 3)
+        True
         >>> bool(np.all(xyz[..., 0] == las.x))
         True
+
+        In strict read mode this raises
+        :class:`laspy.errors.FieldNotReadableError` if any of the three
+        coordinate axes was not decompressed.
         """
+        for axis in ("X", "Y", "Z"):
+            self.points._check_field_readable(axis)
         return np.vstack((self.x, self.y, self.z)).transpose()
 
     @xyz.setter
@@ -142,12 +175,22 @@ class LasData:
 
         params: list of parameters of the new extra dimensions to add
         """
+        previous_readability = self.points.readability
         self.header.add_extra_dims(params)
         new_point_record = record.ScaleAwarePointRecord.zeros(
             len(self.points), header=self.header
         )
         new_point_record.copy_fields_from(self.points)
         self.points = new_point_record
+        if previous_readability is not None:
+            # Strict mode survives the structural change: the fields that
+            # were not decoded stay unreadable, while the freshly created
+            # extra dimensions are fully in-memory and thus readable.
+            new_names = {p.name for p in params}
+            readable = set(previous_readability.readable_fields()) | new_names
+            self.points.readability = FieldReadability(
+                self.header.point_format, readable
+            )
 
     def remove_extra_dims(self, names: Iterable[str]) -> None:
         """Remove multiple extra dimensions from this object
@@ -165,6 +208,7 @@ class LasData:
         LaspyException: if you try to remove an extra dimension that do not exist.
 
         """
+        previous_readability = self.points.readability
         extra_dimension_names = list(self.point_format.extra_dimension_names)
         not_extra_dimension = [
             name for name in names if name not in extra_dimension_names
@@ -180,6 +224,13 @@ class LasData:
         )
         new_point_record.copy_fields_from(self.points)
         self.points = new_point_record
+        if previous_readability is not None:
+            # Re-derive the readability against the reduced point format;
+            # the removed names are filtered out automatically.
+            self.points.readability = FieldReadability(
+                self.header.point_format,
+                previous_readability.readable_fields(),
+            )
 
     def remove_extra_dim(self, name: str) -> None:
         """Remove an extra dimensions from this object

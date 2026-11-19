@@ -11,9 +11,11 @@ from typing import Optional
 
 import numpy as np
 
+from .. import errors
 from ..point import PointFormat
 from . import dims
 from .dims import OLD_LASPY_NAMES, ScaledArrayView
+from .readability import FieldReadability
 
 logger = logging.getLogger(__name__)
 
@@ -57,10 +59,16 @@ class PackedPointRecord:
     True
     """
 
-    def __init__(self, data: np.ndarray, point_format: PointFormat):
+    def __init__(
+        self,
+        data: np.ndarray,
+        point_format: PointFormat,
+        readability: Optional[FieldReadability] = None,
+    ):
         self.__dict__["array"] = data
         self.__dict__["point_format"] = point_format
         self.__dict__["sub_fields_dict"] = dims.get_sub_fields_dict(point_format.id)
+        self.__dict__["readability"] = readability
 
     @property
     def point_size(self):
@@ -117,7 +125,15 @@ class PackedPointRecord:
         to point format while doing so
         """
         array = np.zeros_like(other_point_record.array, dtype=new_point_format.dtype())
-        new_record = cls(array, new_point_format)
+        # Preserve the strict readability for the fields shared by both
+        # formats; fields only present in the new format were never read and
+        # are filtered out by the FieldReadability constructor.
+        readability = other_point_record.readability
+        if readability is not None:
+            readability = FieldReadability(
+                new_point_format, readability.readable_fields()
+            )
+        new_record = cls(array, new_point_format, readability)
         new_record.copy_fields_from(other_point_record)
         return new_record
 
@@ -133,11 +149,13 @@ class PackedPointRecord:
         for dim_name in self.point_format.dimension_names:
             try:
                 self[dim_name] = np.array(other_record[dim_name])
-            except ValueError:
+            except (ValueError, errors.FieldNotReadableError):
                 pass
 
     def copy(self) -> "PackedPointRecord":
-        return PackedPointRecord(self.array.copy(), deepcopy(self.point_format))
+        return PackedPointRecord(
+            self.array.copy(), deepcopy(self.point_format), self.readability
+        )
 
     def memoryview(self) -> memoryview:
         return memoryview(self.array)
@@ -168,12 +186,73 @@ class PackedPointRecord:
             return 1
         return self.array.shape[0]
 
+    @staticmethod
+    def _normalize_field_name(field_name: str) -> str:
+        """Resolves public field aliases to the stored field name.
+
+        Handles the legacy laspy names and the scaled lowercase ``x``/``y``
+        /``z`` views, which are views of the packed ``X``/``Y``/``Z`` fields.
+        """
+        resolved = OLD_LASPY_NAMES.get(field_name, field_name)
+        if resolved in ("x", "y", "z"):
+            resolved = resolved.upper()
+        return resolved
+
+    def _check_field_readable(self, item) -> None:
+        """Raises if *item* names a field that exists but was not read.
+
+        No-op when no readability metadata is attached (the default
+        behaviour) or when the item is not a field name. Fields that do not
+        exist in the point format are left to the regular lookup so that the
+        usual unknown-field error is raised instead.
+        """
+        if self.readability is None or not isinstance(item, str):
+            return
+        # FieldReadability resolves the aliases internally but reports the
+        # name as requested by the caller.
+        self.readability.ensure_readable(item)
+
+    def is_field_readable(self, field_name: str) -> bool:
+        """Returns whether *field_name* can be accessed on this record.
+
+        A field is readable when it exists in the point format and was
+        actually decoded from the source. The check never triggers any
+        (re)reading of the file. Without strict read metadata every field of
+        the format is considered readable.
+        """
+        field_name = self._normalize_field_name(field_name)
+        if self.readability is None:
+            validity = self.validate_dimension_name(field_name)
+            return validity == DimensionNameValidity.Valid
+        return self.readability.is_readable(field_name)
+
+    def readable_fields(self) -> frozenset:
+        """Returns the names of the fields that are readable on this record.
+
+        This never touches the underlying source. Without strict read
+        metadata, every field of the point format is reported as readable.
+        """
+        if self.readability is None:
+            names = set(self.point_format.dimension_names)
+            names.update(self.array.dtype.names)
+            return frozenset(names)
+        return self.readability.readable_fields()
+
     def __getitem__(self, item):
         """Gives access to the underlying numpy array
         Unpack the dimension if item is the name a sub-field
         """
         if isinstance(item, (int, slice, np.ndarray, list, tuple)):
-            return PackedPointRecord(self.array[item], self.point_format)
+            if isinstance(item, (list, tuple)) and all(
+                isinstance(el, str) for el in item
+            ):
+                for el in item:
+                    self._check_field_readable(el)
+            return PackedPointRecord(
+                self.array[item], self.point_format, self.readability
+            )
+
+        self._check_field_readable(item)
 
         try:
             item = OLD_LASPY_NAMES[item]
@@ -203,6 +282,11 @@ class PackedPointRecord:
     def __setitem__(self, key, value):
         """Sets elements in the array"""
         if isinstance(key, (tuple, list)):
+            if all(isinstance(el, str) for el in key):
+                for el in key:
+                    # The check resolves lowercase x/y/z to X/Y/Z itself,
+                    # while the original key keeps its scaled write semantics.
+                    self._check_field_readable(el)
             if not isinstance(value, np.ndarray):
                 value = np.asarray(value)
 
@@ -218,10 +302,12 @@ class PackedPointRecord:
                     self[name] = value[..., i]
             return
 
-        self._append_zeros_if_too_small(value)
         if isinstance(key, str):
+            self._check_field_readable(key)
+            self._append_zeros_if_too_small(value)
             self[key][:] = value
         else:
+            self._append_zeros_if_too_small(value)
             self.array[key] = value
 
     def __getattr__(self, item):
@@ -278,8 +364,8 @@ class ScaleAwarePointRecord(PackedPointRecord):
 
     """
 
-    def __init__(self, array, point_format, scales, offsets):
-        super().__init__(array, point_format)
+    def __init__(self, array, point_format, scales, offsets, readability=None):
+        super().__init__(array, point_format, readability)
         self.scales = np.array(scales)
         self.offsets = np.array(offsets)
 
@@ -368,15 +454,24 @@ class ScaleAwarePointRecord(PackedPointRecord):
                     item if item not in ("x", "y", "z") else item.upper()
                     for item in item
                 ]
+                for el in item:
+                    self._check_field_readable(el)
             return ScaleAwarePointRecord(
-                self.array[item], self.point_format, self.scales, self.offsets
+                self.array[item],
+                self.point_format,
+                self.scales,
+                self.offsets,
+                self.readability,
             )
 
         if item == "x":
+            self._check_field_readable("X")
             return ScaledArrayView(self.array["X"], self.scales[0], self.offsets[0])
         elif item == "y":
+            self._check_field_readable("Y")
             return ScaledArrayView(self.array["Y"], self.scales[1], self.offsets[1])
         elif item == "z":
+            self._check_field_readable("Z")
             return ScaledArrayView(self.array["Z"], self.scales[2], self.offsets[2])
         else:
             return super().__getitem__(item)

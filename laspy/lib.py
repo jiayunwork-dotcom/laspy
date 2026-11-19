@@ -34,6 +34,7 @@ def open_las(
     read_evlrs: bool = True,
     decompression_selection: DecompressionSelection = DecompressionSelection.all(),
     coordinate_guard=None,
+    strict: bool = False,
 ) -> Union[LasReader, LasWriter, LasAppender]:
     """The laspy.open opens a LAS/LAZ file in one of the 3 supported
     mode:
@@ -125,8 +126,32 @@ def open_las(
 
         By default all fields are decompressed
 
+    strict: bool, default False
+        Only applies to 'r' mode. Enables strict read mode.
+
+        When True, the returned point records remember which fields were
+        actually decompressed according to *decompression_selection*.
+        Accessing a field that exists in the point format but was not read
+        raises :class:`laspy.errors.FieldNotReadableError` (the error message
+        contains the field name), while fields absent from the point format
+        keep raising their usual error. You can inspect the readable fields
+        without triggering any read through
+        :meth:`LasReader.readable_fields`,
+        :meth:`LasReader.is_field_readable`, :meth:`LasData.readable_fields`
+        and :meth:`LasData.is_field_readable`.
+
+        The metadata follows slicing, masking, copying and chunked reads,
+        and stays valid after the reader is closed. On backends or point
+        formats that do not support selective decompression (uncompressed LAS
+        or point formats older than 6), every field is readable.
+
+        When False (the default) the historical behaviour is kept: skipped
+        fields can be accessed and contain placeholder values.
+
     .. versionadded:: 2.4
         The ``read_evlrs`` and ``decompression_selection`` parameters.
+    .. versionadded:: 2.6
+        The ``strict`` parameter.
 
     coordinate_guard: bool, number, sequence of 3 numbers, CoordinateGrid or CoordinateGuard, optional
         Enables the coordinate precision guard in 'w' and 'a' mode
@@ -170,6 +195,10 @@ def open_las(
                 "coordinate_guard argument is not used when opening in read mode, "
                 "did you meant to open in write or append mode ?"
             )
+        if strict and mode != "r":
+            raise LaspyException(
+                "strict argument is only used when opening in read mode"
+            )
         if isinstance(source, (str, Path)):
             stream = open(source, mode="rb", closefd=closefd)
         elif isinstance(source, bytes):
@@ -183,6 +212,7 @@ def open_las(
                 laz_backend=laz_backend,
                 read_evlrs=read_evlrs,
                 decompression_selection=decompression_selection,
+                strict=strict,
             )
         except:
             if closefd:
@@ -245,6 +275,7 @@ def read_las(
     closefd=True,
     laz_backend=LazBackend.detect_available(),
     decompression_selection: DecompressionSelection = DecompressionSelection.all(),
+    strict: bool = False,
 ):
     """Entry point for reading las data in laspy
 
@@ -270,6 +301,9 @@ def read_las(
     decompression_selection: DecompressionSelection,
         see :func:`laspy.open`
 
+    strict: bool, default False
+        see :func:`laspy.open`
+
 
     Returns
     -------
@@ -279,12 +313,15 @@ def read_las(
 
     .. versionadded:: 2.4
         The ``decompression_selection`` parameter.
+    .. versionadded:: 2.6
+        The ``strict`` parameter.
     """
     with open_las(
         source,
         closefd=closefd,
         laz_backend=laz_backend,
         decompression_selection=decompression_selection,
+        strict=strict,
     ) as reader:
         return reader.read()
 

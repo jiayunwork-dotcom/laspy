@@ -484,34 +484,46 @@ class LasHeader:
             self.grow(points)
 
     def grow(self, points: PackedPointRecord) -> None:
+        # This uses the raw structured array on purpose: the header bookkeeping
+        # must keep working on point records read in strict mode where some
+        # fields may not have been decompressed. The readability guards apply
+        # to the public field accessors, not to the underlying array.
+        raw = points.array
         self.x_max = max(
             self.x_max,
-            (points["X"].max() * self.x_scale) + self.x_offset,
+            (raw["X"].max() * self.x_scale) + self.x_offset,
         )
         self.y_max = max(
             self.y_max,
-            (points["Y"].max() * self.y_scale) + self.y_offset,
+            (raw["Y"].max() * self.y_scale) + self.y_offset,
         )
         self.z_max = max(
             self.z_max,
-            (points["Z"].max() * self.z_scale) + self.z_offset,
+            (raw["Z"].max() * self.z_scale) + self.z_offset,
         )
         self.x_min = min(
             self.x_min,
-            (points["X"].min() * self.x_scale) + self.x_offset,
+            (raw["X"].min() * self.x_scale) + self.x_offset,
         )
         self.y_min = min(
             self.y_min,
-            (points["Y"].min() * self.y_scale) + self.y_offset,
+            (raw["Y"].min() * self.y_scale) + self.y_offset,
         )
         self.z_min = min(
             self.z_min,
-            (points["Z"].min() * self.z_scale) + self.z_offset,
+            (raw["Z"].min() * self.z_scale) + self.z_offset,
         )
 
-        for return_number, count in zip(
-            *np.unique(points.return_number, return_counts=True)
-        ):
+        # return_number is a sub-field of bit_fields (3 bits on point
+        # formats 0-5, 4 bits on formats 6+), extract it without going
+        # through the guarded field accessors.
+        if points.point_format.id >= 6:
+            mask = dims.RETURN_NUMBER_MASK_6
+        else:
+            mask = dims.RETURN_NUMBER_MASK_0
+        lsb = dims.packing.least_significant_bit_set(mask)
+        return_numbers = (raw["bit_fields"] & mask) >> lsb
+        for return_number, count in zip(*np.unique(return_numbers, return_counts=True)):
             if return_number == 0:
                 continue
             if return_number > len(self.number_of_points_by_return):

@@ -3,6 +3,7 @@
 
 from ._compression.backend import *
 from ._compression.format import *
+from ._compression.selection import DecompressionReference
 
 __all__ = [
     "LazBackend",
@@ -10,4 +11,5 @@ __all__ = [
     "compressed_id_to_uncompressed",
     "uncompressed_id_to_compressed",
     "DecompressionSelection",
+    "DecompressionReference",
 ]

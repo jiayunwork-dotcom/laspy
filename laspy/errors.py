@@ -22,6 +22,24 @@ class LazError(LaspyException):
     pass
 
 
+class FieldNotReadableError(LaspyException):
+    """Raised in strict read mode when accessing a point field that exists
+    in the point format but was not decompressed/read from the source.
+
+    Fields that do not exist in the point format keep raising their usual
+    error instead of this one.
+
+    .. versionadded:: 2.6
+    """
+
+    def __init__(self, field_name: str):
+        self.field_name = field_name
+        super().__init__(
+            f"Point field '{field_name}' exists in the point format but was not "
+            f"read (it was skipped by the selective decompression selection)"
+        )
+
+
 class IncompatibleDataFormat(LaspyException):
     pass
 

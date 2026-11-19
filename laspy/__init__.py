@@ -12,6 +12,7 @@ from .errors import (
     CoordinatePrecisionError,
     CoordinatePrecisionExceeded,
     CoordinateRangeTooPrecise,
+    FieldNotReadableError,
     IncompatiblePointFormat,
     InvalidCoordinateBounds,
     InvalidCoordinateTolerance,
@@ -33,6 +34,7 @@ from .lib import read_las as read
 from .point import DimensionInfo, DimensionKind, ExtraBytesParams, PointFormat
 from .point.dims import supported_point_formats, supported_versions
 from .point.format import lost_dimensions
+from .point.readability import FieldReadability
 from .point.record import PackedPointRecord, ScaleAwarePointRecord
 from .vlrs import VLR
 

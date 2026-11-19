@@ -20,6 +20,22 @@
   precision loss) are rejected in full, leaving the file and the header
   statistics untouched, and the session can keep accepting valid batches.
   The default (`None`) keeps the historic behaviour.
+- Opt-in strict read mode for selective decompression:
+  `laspy.open`, `laspy.read` and `laspy.CopcReader.open` now accept
+  `strict=True`. In that mode point records remember which fields were
+  actually decompressed; accessing an existing but skipped field raises the
+  new `laspy.errors.FieldNotReadableError` (with the field name in the
+  message), while absent fields keep their usual error. Readability can be
+  inspected without triggering any read through
+  `LasReader.readable_fields`/`is_field_readable`,
+  `CopcReader.readable_fields`/`is_field_readable` and
+  `LasData.readable_fields`/`is_field_readable`; the metadata follows
+  slicing, masking, copying and chunked reads (including empty results) and
+  stays valid after closing the reader. Uncompressed LAS and point formats
+  without selective decompression report every field as readable. COPC 3D
+  window queries still filter on the real elevation even when `Z` was not
+  selected: `Z` is decoded internally for filtering only and stays
+  unreadable publicly. The default (`strict=False`) is unchanged.
 
 ## Version 2.5.4 (19/06/2024)
 

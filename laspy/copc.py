@@ -26,10 +26,11 @@ except ModuleNotFoundError:
 
 import numpy as np
 
-from .compression import DecompressionSelection
+from .compression import DecompressionReference, DecompressionSelection
 from .errors import LaspyException, LazError
 from .header import LasHeader
 from .point.record import PackedPointRecord, ScaleAwarePointRecord
+from .point.readability import FieldReadability, readable_fields_for_selection
 from .vlrs.known import BaseKnownVLR
 
 DEFAULT_HTTP_WORKERS_NUM = multiprocessing.cpu_count() * 5
@@ -563,6 +564,7 @@ class CopcReader:
         http_num_threads: int = DEFAULT_HTTP_WORKERS_NUM,
         _http_strategy: str = "queue",
         decompression_selection: DecompressionSelection = DecompressionSelection.all(),
+        strict: bool = False,
     ):
         """
         Creates a CopcReader.
@@ -585,10 +587,21 @@ class CopcReader:
         decompression_selection: DecompressionSelection,
             see :func:`laspy.open`
 
+        strict: bool, default False
+            When True, point records returned by :meth:`query` keep track of
+            the fields actually decompressed and raise
+            :class:`laspy.errors.FieldNotReadableError` when a skipped but
+            existing field is accessed. See :func:`laspy.open` for the full
+            semantics. Note that when a 3D bounds query needs Z for filtering,
+            Z is decompressed internally for the filter but stays unreadable
+            from the caller's point of view unless it was selected.
+
 
 
         .. versionadded:: 2.4
             The ``decompression_selection`` parameter.
+        .. versionadded:: 2.6
+            The ``strict`` parameter.
         """
         if lazrs is None:
             raise LazError("COPC support requires the 'lazrs' backend")
@@ -596,7 +609,9 @@ class CopcReader:
         self.close_fd = close_fd
         self.http_num_threads = http_num_threads
         self.http_strategy = _http_strategy
-        self.decompression_selection: lazrs.DecompressionSelection = (
+        self.strict = strict
+        self.decompression_selection = decompression_selection
+        self._lazrs_selection: lazrs.DecompressionSelection = (
             decompression_selection.to_lazrs()
         )
 
@@ -640,6 +655,41 @@ class CopcReader:
         # but it will get updated as the queries may need more pages
         self.root_page = HierarchyPage.from_bytes(root_page_bytes)
 
+        # Readability is fully determined by the header and the selection:
+        # computing it here makes the queries free of any extra logic and
+        # keeps the information available once the reader is closed.
+        self.readability: Optional[FieldReadability] = (
+            FieldReadability(
+                self.header.point_format,
+                readable_fields_for_selection(
+                    self.header.point_format, decompression_selection
+                ),
+            )
+            if strict
+            else None
+        )
+
+    def readable_fields(self) -> frozenset:
+        """Returns the fields that query results expose as readable.
+
+        Mirrors the reader's :class:`DecompressionSelection` intersected with
+        the point format, and never reads any point. Without strict mode,
+        every field of the point format is reported as readable.
+        """
+        if self.readability is None:
+            return FieldReadability.all_readable(
+                self.header.point_format
+            ).readable_fields()
+        return self.readability.readable_fields()
+
+    def is_field_readable(self, field_name: str) -> bool:
+        """Returns whether *field_name* will be readable on query results."""
+        if self.readability is None:
+            return FieldReadability.all_readable(self.header.point_format).is_readable(
+                field_name
+            )
+        return self.readability.is_readable(field_name)
+
     @classmethod
     def open(
         cls,
@@ -647,6 +697,7 @@ class CopcReader:
         http_num_threads: int = DEFAULT_HTTP_WORKERS_NUM,
         _http_strategy: str = "queue",
         decompression_selection: DecompressionSelection = DecompressionSelection.all(),
+        strict: bool = False,
     ) -> "CopcReader":
         """
         Opens the COPC file.
@@ -668,6 +719,9 @@ class CopcReader:
 
         decompression_selection: DecompressionSelection,
             see :func:`laspy.open`
+
+        strict: bool, default False
+            see :class:`CopcReader`
 
 
         Opening a local file
@@ -694,6 +748,8 @@ class CopcReader:
 
         .. versionadded:: 2.4
             The ``decompression_selection`` parameter.
+        .. versionadded:: 2.6
+            The ``strict`` parameter.
         """
         if isinstance(source, (str, os.PathLike)):
             source = str(source)
@@ -706,6 +762,7 @@ class CopcReader:
             source,
             http_num_threads=http_num_threads,
             decompression_selection=decompression_selection,
+            strict=strict,
         )
 
     def query(
@@ -755,6 +812,8 @@ class CopcReader:
         if isinstance(level, int):
             level = range(level, level + 1)
 
+        is_3d_bounds = bounds is not None and len(bounds.mins) == 3
+
         if bounds is not None:
             bounds = bounds.ensure_3d(self.header.mins, self.header.maxs)
 
@@ -765,8 +824,23 @@ class CopcReader:
             query_bounds=bounds,
             level_range=level,
         )
-        # print("num nodes to query:", len(nodes));
-        points = self._fetch_and_decrompress_points_of_nodes(nodes)
+        # A 3D window filters on the actual Z values. If the caller did not
+        # ask for Z to be decompressed, we still have to decode it internally
+        # or the filtering would run on placeholder data. This extra decoding
+        # cost is paid only for 3D queries; the field stays unreadable from
+        # the caller's perspective (the public readability follows the
+        # caller's selection, not this internal addition).
+        internal_selection = self._lazrs_selection
+        if is_3d_bounds and not self.decompression_selection.is_set(
+            DecompressionReference.Z
+        ):
+            internal_selection = (
+                self.decompression_selection | DecompressionReference.Z
+            ).to_lazrs()
+
+        points = self._fetch_and_decrompress_points_of_nodes(
+            nodes, lazrs_selection=internal_selection
+        )
 
         if bounds is not None:
             MINS = np.round(
@@ -775,15 +849,14 @@ class CopcReader:
             MAXS = np.round(
                 (bounds.maxs - self.header.offsets) / self.header.scales
             ).astype(np.int32)
-            x_keep = (MINS[0] <= points.X) & (points.X <= MAXS[0])
-            y_keep = (MINS[1] <= points.Y) & (points.Y <= MAXS[1])
-            z_keep = (MINS[2] <= points.Z) & (points.Z <= MAXS[2])
-
-            # using scaled coordinates
-            # x, y, z = np.array(points.x), np.array(points.y), np.array(points.z)
-            # x_keep = (bounds.mins[0] <= x) & (x <= bounds.maxs[0])
-            # y_keep = (bounds.mins[1] <= y) & (y <= bounds.maxs[1])
-            # z_keep = (bounds.mins[2] <= z) & (z <= bounds.maxs[2])
+            # Use the raw structured array: in strict mode Z may have been
+            # decoded solely for this filtering step (and thus be unreadable
+            # through the public, guarded field accessors), while X/Y are
+            # always part of the base selection.
+            raw = points.array
+            x_keep = (MINS[0] <= raw["X"]) & (raw["X"] <= MAXS[0])
+            y_keep = (MINS[1] <= raw["Y"]) & (raw["Y"] <= MAXS[1])
+            z_keep = (MINS[2] <= raw["Z"]) & (raw["Z"] <= MAXS[2])
 
             keep_mask = x_keep & y_keep & z_keep
             points.array = points.array[keep_mask].copy()
@@ -796,10 +869,17 @@ class CopcReader:
         return self.query(bounds=None, level=level)
 
     def _fetch_and_decrompress_points_of_nodes(
-        self, nodes_to_read: List[OctreeNode]
+        self,
+        nodes_to_read: List[OctreeNode],
+        lazrs_selection=None,
     ) -> ScaleAwarePointRecord:
         if not nodes_to_read:
-            return ScaleAwarePointRecord.empty(header=self.header)
+            empty = ScaleAwarePointRecord.empty(header=self.header)
+            empty.readability = self.readability
+            return empty
+
+        if lazrs_selection is None:
+            lazrs_selection = self._lazrs_selection
 
         # Group together contiguous nodes
         # so that we minimize the number of
@@ -831,11 +911,15 @@ class CopcReader:
             self.laszip_vlr.record_data,
             points_array,
             chunk_table,
-            self.decompression_selection,
+            lazrs_selection,
         )
         r = PackedPointRecord.from_buffer(points_array, self.header.point_format)
         points = ScaleAwarePointRecord(
-            r.array, r.point_format, self.header.scales, self.header.offsets
+            r.array,
+            r.point_format,
+            self.header.scales,
+            self.header.offsets,
+            readability=self.readability,
         )
 
         return points

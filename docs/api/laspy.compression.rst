@@ -17,3 +17,11 @@ DecompressionSelection
     :members:
     :undoc-members:
     :show-inheritance:
+
+DecompressionReference
+----------------------
+
+.. autoclass:: laspy.compression.DecompressionReference
+    :members:
+    :undoc-members:
+    :show-inheritance:

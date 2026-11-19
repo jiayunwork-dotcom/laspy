@@ -22,6 +22,8 @@ def open_las(
     source: PathLike,
     mode: Literal["r"] = ...,
     laz_backend: Union[LazBackend, Iterable[LazBackend]] = ...,
+    decompression_selection: DecompressionSelection = ...,
+    strict: bool = ...,
 ) -> LasReader: ...
 @overload
 def open_las(
@@ -29,6 +31,8 @@ def open_las(
     mode: Literal["r"] = ...,
     closefd: bool = ...,
     laz_backend: Union[LazBackend, Iterable[LazBackend]] = ...,
+    decompression_selection: DecompressionSelection = ...,
+    strict: bool = ...,
 ) -> LasReader: ...
 @overload
 def open_las(
@@ -71,6 +75,7 @@ def read_las(
         LazBackend, Iterable[LazBackend]
     ] = LazBackend.detect_available(),
     decompression_selection: DecompressionSelection = DecompressionSelection.all(),
+    strict: bool = False,
 ) -> LasData: ...
 def mmap_las(filename: PathLike) -> LasMMAP: ...
 def merge_las(las_files: Union[Iterable[LasData], LasData]) -> LasData: ...

@@ -227,3 +227,8 @@ class DecompressionSelection(enum.IntFlag):
             laszip_selection |= variant_mapping[variant] if self.is_set(variant) else 0
 
         return laszip_selection
+
+
+#: Public alias kept for readability bookkeeping code that needs to refer to
+#: the selection flags without importing the whole compression machinery.
+DecompressionReference = DecompressionSelection
